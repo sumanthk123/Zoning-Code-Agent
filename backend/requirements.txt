@@ -1,0 +1,14 @@
+# Core browser automation
+browser-use
+
+# LangChain integrations for different LLM providers
+langchain-openai
+langchain-anthropic
+langchain-google-genai
+
+# Web framework (for API if needed)
+fastapi
+uvicorn
+
+# Environment variables
+python-dotenv

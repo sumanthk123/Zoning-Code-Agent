@@ -1,0 +1,5 @@
+# Core browser automation
+browser-use
+
+# Additional dependencies
+python-dotenv
