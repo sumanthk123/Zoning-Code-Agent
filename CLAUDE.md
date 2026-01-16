@@ -28,14 +28,6 @@ python backend/demo.py
 python backend/form_filler.py
 ```
 
-### Frontend (Next.js)
-```bash
-npm install
-npm run dev    # Development server at http://localhost:3000
-npm run build  # Production build
-npm run lint   # ESLint
-```
-
 ### Browser-use Setup
 ```bash
 uvx browser-use install  # Install Chromium for browser-use
