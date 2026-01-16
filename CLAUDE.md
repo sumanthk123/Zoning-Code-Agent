@@ -4,177 +4,161 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Zoning Code Agent** - An automated tool for submitting public records requests to U.S. municipalities to obtain historical zoning codes.
-
-### Objective
-Automate the process of filling out and submitting public records request forms across different municipal websites to request zoning codes from 1940 or the earliest post-1940 adoption.
+**Zoning Code Agent** - Automated submission of public records requests to U.S. municipalities for historical zoning codes (1940 or first post-1940 adoption).
 
 ### Standard Request Text
 "Could you please send me {municipality}'s municipal zoning code as of 1940? If a zoning code didn't exist then, could you send me the first post 1940 adoption of the zoning code?"
 
-## Architecture Overview
+## Commands
 
-The system is designed with a progressive complexity approach:
-
-### Phase 1: Baseline - Simple Forms
-Handle the simplest case: direct links to online forms with no login requirement.
-
-**Three-stage pipeline:**
-1. **Form Conversion**: Convert web forms to markdown representation
-2. **Form Filling**: Populate form fields with appropriate data
-3. **Form Submission**: Submit the completed form
-
-### Phase 2: Advanced Tools
-Build specialized tools to handle edge cases and failures:
-- ReCAPTCHA solving/handling
-- Login/authentication with third-party services (e.g., NextRequest.com)
-- Municipal website account creation
-- Non-standard form formats (PDF forms, email-based submissions)
-- Error recovery and retry logic
-
-## Form Types Encountered
-
-1. **Simple web forms**: Direct HTML forms with submit buttons (no login)
-2. **Third-party platforms**: NextRequest.com, Laserfiche portals
-3. **PDF forms**: Downloadable forms requiring email submission
-4. **Authenticated forms**: Requiring login to municipal or third-party systems
-
-## Test Cases
-
-Known public records request form URLs for testing:
-1. https://portal.laserfiche.com/n6789/forms/PRA - Laserfiche portal
-2. https://www.townofblackstone.org/688/Public-Records-Request - Town of Blackstone
-3. https://losgatosca.nextrequest.com/requests/new - Los Gatos (NextRequest)
-4. https://peachtreecitygapolice.nextrequest.com/requests/new - Peachtree City (NextRequest)
-5. https://www.leawood.org/DocumentCenter/View/358/Open-Record-Request-Form-PDF - Leawood (PDF)
-
-## Form Field Population
-
-**Default contact information:**
-- Use Claude Code operator's email addresses for submissions
-- Names and addresses can be generated/mocked as needed
-
-**Request description:** Auto-populated with the standard request text (see above), replacing {municipality} with the appropriate municipality name.
-
-## Implementation Approach
-
-This project uses **browser-use** (https://github.com/browser-use/browser-use) - a browser automation agent framework that enables AI-controlled web browsing.
-
-### Why browser-use?
-
-Browser-use provides an AI agent that can:
-- Navigate web pages autonomously
-- Understand and interact with web forms
-- Handle dynamic content and JavaScript-heavy sites
-- Adapt to different form layouts and structures
-- Recover from errors and unexpected page states
-
-This approach is ideal for handling the variety of municipal form types without requiring custom scrapers for each municipality.
-
-## Project Structure
-
-```
-/
-├── backend/           # Python backend with browser-use agent
-│   ├── agent.py      # Main browser automation logic
-│   ├── requirements.txt
-│   └── .env          # API keys and config (not committed)
-├── app/              # Next.js frontend
-├── package.json      # Node.js dependencies
-└── CLAUDE.md         # This file
-```
-
-## Development Setup
-
-### Backend (Python - Browser Agent)
-
-**Prerequisites:**
-- Python 3.11+
-- An API key for an LLM provider (see options below)
-
-**Installation:**
+### Backend (Python)
 ```bash
-# Create virtual environment (if not already created)
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
+source venv/bin/activate              # Activate virtual environment
 pip install -r backend/requirements.txt
 
-# Install Chromium browser for browser-use
-uvx browser-use install
+# Main batch processor (recommended)
+python backend/batch_processor.py sample_30_forms.csv --stats    # View statistics
+python backend/batch_processor.py sample_30_forms.csv --limit 5  # Process 5 forms
+python backend/batch_processor.py sample_30_forms.csv --type PDF # Process PDFs only
 
-# Configure environment
-cp backend/.env.example backend/.env
-# Edit backend/.env and add your API key and contact information
-```
+# Demo script (no real submissions)
+python backend/demo.py
 
-**API Key Options** (choose one):
-- **OpenRouter** (Recommended): Free models available! Get key at https://openrouter.ai/keys
-  - Supports many models including free options like `openai/gpt-oss-20b:free`
-- **Browser Use**: Get $10 free credits at https://cloud.browser-use.com/new-api-key
-- **Google Gemini**: Free tier at https://aistudio.google.com/app/apikey
-- **OpenAI**: Requires paid API key
-- **Anthropic Claude**: Requires paid API key
-
-**Test basic setup:**
-```bash
-# Test the basic agent module
-python backend/agent.py
-
-# Test browser automation (requires API key)
-python backend/test_browser.py
-```
-
-## Usage
-
-### Fill a Single Form
-
-```bash
+# Legacy single-form script
 python backend/form_filler.py
 ```
 
-This will test with the Town of Blackstone form by default.
-
-### Test All Forms
-
-```bash
-# Test all 5 forms sequentially
-python backend/test_forms.py
-
-# Test a specific form (1-5)
-python backend/test_forms.py 1
-```
-
-### In Your Own Code
-
-```python
-from backend.form_filler import fill_and_submit_form
-
-result = await fill_and_submit_form(
-    form_url="https://example.com/records-request",
-    municipality="Example City",
-    name="Your Name",        # Optional, uses .env default
-    email="you@email.com",   # Optional, uses .env default
-    address="Your Address"   # Optional, uses .env default
-)
-
-print(f"Success: {result['success']}")
-```
-
 ### Frontend (Next.js)
-
-**Installation:**
 ```bash
-# Already installed if node_modules exists
 npm install
-
-# Run development server
-npm run dev
+npm run dev    # Development server at http://localhost:3000
+npm run build  # Production build
+npm run lint   # ESLint
 ```
 
-Access at http://localhost:3000
+### Browser-use Setup
+```bash
+uvx browser-use install  # Install Chromium for browser-use
+```
 
-## Testing
+## Architecture
 
-To be documented once tests are implemented.
+### System Overview
+```
+batch_processor.py          # Main CLI orchestrator
+├── csv_reader.py           # Parses CSV, auto-classifies URLs
+├── result_store.py         # SQLite storage for results
+├── utils/
+│   ├── url_classifier.py   # URL → FormType mapping
+│   └── rate_limiter.py     # Async rate limiting
+├── models/
+│   ├── enums.py            # FormType, SubmissionStatus, FailureReason
+│   ├── form_entry.py       # Input data model
+│   └── submission_result.py # Output data model
+└── handlers/
+    ├── base_handler.py     # Abstract base class
+    ├── web_form_handler.py # Generic browser automation
+    ├── nextrequest_handler.py
+    ├── justfoia_handler.py
+    ├── govqa_handler.py
+    ├── civicplus_handler.py
+    └── pdf_form_handler.py # Downloads & fills PDFs
+```
+
+### Core Flow
+1. **CSV Reader** parses input file, auto-classifies each URL into a FormType
+2. **Batch Processor** selects appropriate handler for each form
+3. **Handler** executes submission (browser automation or PDF download)
+4. **Result Store** saves outcome to SQLite for tracking/resume
+5. **PDF forms** are downloaded and filled (no email - manual step)
+
+### Handler Selection
+| URL Pattern | FormType | Handler |
+|-------------|----------|---------|
+| `*.nextrequest.com` | NEXTREQUEST | NextRequestHandler |
+| `*.justfoia.com` | JUSTFOIA | JustFOIAHandler |
+| `*.govqa.us` | GOVQA | GovQAHandler |
+| `/FormCenter/` | CIVICPLUS | CivicPlusHandler |
+| `*.pdf` | PDF | PDFFormHandler |
+| (other) | GENERIC_WEB | WebFormHandler |
+
+## Configuration
+
+### Environment Variables (`backend/.env`)
+```
+OPENROUTER_API_KEY=your_key_here
+OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
+DEFAULT_NAME=Your Name
+DEFAULT_EMAIL=you@email.com
+DEFAULT_ADDRESS=123 Main St, City, State ZIP
+DEFAULT_PHONE=555-1234
+DEFAULT_PASSWORD=password  # For sites requiring login
+```
+
+### CLI Options
+```
+python batch_processor.py <csv_file> [options]
+
+--stats           Show CSV statistics only
+--type TYPE       Process only this form type (NEXTREQUEST, PDF, etc.)
+--rank N          Process only forms with this rank (1 = best)
+--limit N         Maximum forms to process
+--rate-limit N    Seconds between submissions (default: 30)
+--no-resume       Don't skip already-processed forms
+--headless        Run browser without visible window
+--export FILE     Export results to CSV
+--retry-failed    Retry previously failed submissions
+```
+
+## Data Format
+
+### Input: `sample_30_forms.csv`
+| Column | Description |
+|--------|-------------|
+| `census_id` | Unique municipality identifier |
+| `municipality` | Municipality name |
+| `state` | State abbreviation |
+| `rank` | URL priority (1 = best option) |
+| `url` | Form URL |
+| `description` | Context passed to agent for navigation |
+
+### Output: SQLite Database (`backend/data/results.db`)
+| Field | Description |
+|-------|-------------|
+| `form_entry_id` | Links to CSV entry |
+| `status` | SUCCESS, PDF_DOWNLOADED, FAILED, CAPTCHA_BLOCKED |
+| `confirmation_number` | If portal provided one |
+| `pdf_downloaded_path` | Where PDF was saved |
+| `pdf_filled_path` | Where filled PDF was saved |
+| `error_message` | Details if failed |
+
+## Form Types Handled
+- **Web forms**: NextRequest, JustFOIA, GovQA, CivicPlus FormCenter
+- **PDF forms**: Downloaded and auto-filled (requires manual email)
+- **Generic web**: Any other form using browser automation
+
+## Agent Behavior
+- Fills ALL fields, makes educated guesses for missing info
+- Handles date fields by typing MM/DD/YYYY first, falls back to calendar
+- Closes pop-ups/cookie banners automatically
+- Stops on CAPTCHA (reports CAPTCHA_BLOCKED status)
+- PDF forms: Downloads, fills fields, saves to `data/filled_pdfs/`
+- For historical zoning, uses date range 01/01/1940 to 12/31/1945
+
+## Key Integration Points
+
+### For Email Pipeline
+```python
+from result_store import ResultStore
+
+store = ResultStore("data/results.db")
+for r in store.get_all_results():
+    if r.status.value == "pdf_downloaded":
+        # This PDF needs to be emailed to municipality
+        print(f"Email {r.pdf_filled_path} to {r.municipality}")
+```
+
+### Files for Reference
+- `README.md` - Full documentation with architecture diagrams
+- `docs/WALKTHROUGH.md` - Step-by-step examples
+- `backend/demo.py` - Demo script showing system capabilities

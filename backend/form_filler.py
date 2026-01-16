@@ -1,17 +1,17 @@
 import asyncio
 import os
 from dotenv import load_dotenv
-from browser_use import Agent, Browser
+from browser_use import Agent, Browser, ChatOpenAI
 from typing import Optional
 
 load_dotenv()
 
 
 def get_llm():
-    from browser_use import ChatGoogle
-    return ChatGoogle(
-        model="gemini-2.5-flash-lite",
-        api_key=os.getenv('GOOGLE_API_KEY')
+    return ChatOpenAI(
+        model=os.getenv('OPENROUTER_MODEL'),
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.getenv('OPENROUTER_API_KEY')
     )
 
 
@@ -30,14 +30,16 @@ async def fill_and_submit_form(
     email: Optional[str] = None,
     address: Optional[str] = None,
     phone: Optional[str] = None,
+    password: Optional[str] = None,
     additional_fields: Optional[dict] = None,
-    max_steps: int = 25,
+    max_steps: int = 30,
     interactive: bool = True
 ) -> dict:
     name = name or os.getenv('DEFAULT_NAME', 'John Doe')
     email = email or os.getenv('DEFAULT_EMAIL', 'test@example.com')
     address = address or os.getenv('DEFAULT_ADDRESS', '123 Main St, City, State, ZIP')
     phone = phone or os.getenv('DEFAULT_PHONE', '')
+    password = password or os.getenv('DEFAULT_PASSWORD', '')
     additional_fields = additional_fields or {}
     request_text = get_request_text(municipality)
 
@@ -57,7 +59,44 @@ async def fill_and_submit_form(
     task = f"""
     - Your goal is to fill out and submit a public records request form with the provided information.
     - Navigate to {form_url}
-    - Scroll through the entire form and use extract_structured_data action to extract all the relevant information needed to fill out the form. Use this information and return a structured output that can be used to fill out the entire form with these details: {field_list}. Use the done action to finish the task.
+
+    - FIRST, check if there is a sign in button, login link, or authentication requirement on the page.
+    - If you see a sign in button or login link:
+        1) Click the sign in button
+        2) On the login page, you MUST follow this workflow ONE STEP AT A TIME:
+
+            STEP 1: Inspect what fields are currently on the page
+                - Look at the visible input fields
+                - Is there a password field visible? (type="password")
+                - If you can ONLY see an email field and NO password field, proceed to STEP 2a
+                - If you can see BOTH email AND password fields, proceed to STEP 3
+
+            STEP 2a: IF ONLY email field is visible (NO password field):
+                - Fill ONLY the email field with: {email}
+                - Do NOT attempt to fill password - the field does not exist yet
+                - Click the Continue button
+                - End this action step here
+
+            STEP 2b: In the NEXT action step, AFTER Continue was clicked:
+                - The page should have updated
+                - NOW a password field should be visible
+                - Fill the password field with: {password}
+                - The email field may still show the email - leave it as is
+                - Click the Sign In button
+
+            STEP 3: IF BOTH email AND password fields are visible from the start:
+                - Fill email: {email}
+                - Fill password: {password}
+                - Click Sign In
+        3) Wait for successful login before proceeding
+        4) If account creation is needed and there's a "Sign Up" or "Create Account" option:
+            - Click sign up
+            - Create account with: Name: {name}, Email: {email}, Password: {password}
+            - Complete any required fields (use provided information or make educated guesses)
+            - Submit and verify account creation
+
+    - After handling authentication (or if no login required), proceed with the form:
+    - Scroll through the entire form. Use this information to fill out the entire form with these details: {field_list}. Use the done action to finish the task.
 
     - Follow these instructions carefully:
         - If anything pops up that blocks the form (cookie banners, dialogs, etc.), close it out and continue filling out the form.
@@ -109,7 +148,6 @@ async def fill_and_submit_form(
             * Date needed by: Use "No rush" or leave blank
             * Purpose of request: Use "Research" or "Historical records"
         - If you encounter a CAPTCHA, stop immediately and report it - do NOT attempt to solve it.
-        - If the form requires login/account creation, stop immediately and report it.
         - If the page is just a PDF download link (not a web form), stop immediately and report it.
         - At the end of the task, structure your final_result as:
             1) A human-readable summary of all fields filled and actions performed
@@ -125,7 +163,7 @@ async def fill_and_submit_form(
 
     llm = get_llm()
     browser = Browser(
-	    headless=True,
+	    headless=False,
 	    window_size={'width': 1000, 'height': 700},
     )
     agent = Agent(task=task, llm=llm, use_vision="auto", browser=browser)
@@ -146,8 +184,8 @@ async def fill_and_submit_form(
 
 async def main():
     result = await fill_and_submit_form(
-        form_url="https://portal.laserfiche.com/n6789/forms/PRA",
-        municipality="Town of Blackstone"
+        form_url="https://losgatosca.nextrequest.com/requests/new",
+        municipality="Los Gatos"
     )
 
     print("\nFinal Result:")
