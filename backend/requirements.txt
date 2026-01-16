@@ -12,3 +12,10 @@ uvicorn
 
 # Environment variables
 python-dotenv
+
+# PDF handling
+PyPDF2>=3.0.0
+fillpdf>=0.7.0
+
+# HTTP client for PDF downloads
+aiohttp>=3.9.0
