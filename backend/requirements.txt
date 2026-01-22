@@ -1,14 +1,5 @@
-# Core browser automation
-browser-use
-
-# LangChain integrations for different LLM providers
-langchain-openai
-langchain-anthropic
-langchain-google-genai
-
-# Web framework (for API if needed)
-fastapi
-uvicorn
+# Browser-use Cloud API client
+aiohttp>=3.9.0
 
 # Environment variables
 python-dotenv
@@ -17,5 +8,6 @@ python-dotenv
 PyPDF2>=3.0.0
 fillpdf>=0.7.0
 
-# HTTP client for PDF downloads
-aiohttp>=3.9.0
+# Web framework (for API if needed)
+fastapi
+uvicorn

@@ -28,6 +28,15 @@ class SubmissionStatus(Enum):
     PDF_DOWNLOADED = "pdf_downloaded"
     EMAIL_SENT = "email_sent"
     SKIPPED = "skipped"
+    NEEDS_VERIFICATION = "needs_verification"  # Task completed but unclear if form was submitted
+
+
+class SubmissionConfidence(Enum):
+    """Confidence level in the submission result."""
+    HIGH = "high"        # Agent clicked submit + page navigated to confirmation
+    MEDIUM = "medium"    # Agent clicked submit OR page navigated (one evidence)
+    LOW = "low"          # Agent reported completion but no submit/navigation proof
+    UNKNOWN = "unknown"  # Task finished but minimal evidence
 
 
 class FailureReason(Enum):

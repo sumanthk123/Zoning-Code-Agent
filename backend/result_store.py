@@ -8,7 +8,7 @@ from contextlib import contextmanager
 import logging
 
 from models.submission_result import SubmissionResult
-from models.enums import SubmissionStatus, FailureReason
+from models.enums import SubmissionStatus, FailureReason, SubmissionConfidence
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,7 @@ class ResultStore:
                     url TEXT NOT NULL,
                     status TEXT NOT NULL,
                     failure_reason TEXT,
+                    confidence TEXT DEFAULT 'unknown',
                     started_at TEXT,
                     completed_at TEXT,
                     confirmation_number TEXT,
@@ -73,6 +74,12 @@ class ResultStore:
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            # Add confidence column to existing tables (migration)
+            try:
+                conn.execute("ALTER TABLE submissions ADD COLUMN confidence TEXT DEFAULT 'unknown'")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
             # Indexes for common queries
             conn.execute("""
@@ -187,7 +194,8 @@ class ResultStore:
             stats = {
                 'total': 0,
                 'by_status': {},
-                'by_failure_reason': {}
+                'by_failure_reason': {},
+                'by_confidence': {}
             }
 
             for row in rows:
@@ -213,6 +221,22 @@ class ResultStore:
             for row in rows:
                 if row['failure_reason']:
                     stats['by_failure_reason'][row['failure_reason']] = row['count']
+
+            # Get confidence breakdown
+            confidence_query = "SELECT confidence, COUNT(*) as count FROM submissions"
+            confidence_params = []
+
+            if batch_id:
+                confidence_query += " WHERE batch_id = ?"
+                confidence_params.append(batch_id)
+
+            confidence_query += " GROUP BY confidence"
+
+            rows = conn.execute(confidence_query, confidence_params).fetchall()
+
+            for row in rows:
+                if row['confidence']:
+                    stats['by_confidence'][row['confidence']] = row['count']
 
             return stats
 
@@ -252,6 +276,9 @@ class ResultStore:
 
     def _row_to_result(self, row: sqlite3.Row) -> SubmissionResult:
         """Convert database row to SubmissionResult."""
+        # Handle confidence field (may not exist in older databases)
+        confidence_value = row['confidence'] if 'confidence' in row.keys() else 'unknown'
+
         return SubmissionResult(
             form_entry_id=row['form_entry_id'],
             census_id=row['census_id'],
@@ -260,6 +287,7 @@ class ResultStore:
             url=row['url'],
             status=SubmissionStatus(row['status']),
             failure_reason=FailureReason(row['failure_reason']) if row['failure_reason'] else FailureReason.NONE,
+            confidence=SubmissionConfidence(confidence_value) if confidence_value else SubmissionConfidence.UNKNOWN,
             started_at=datetime.fromisoformat(row['started_at']) if row['started_at'] else None,
             completed_at=datetime.fromisoformat(row['completed_at']) if row['completed_at'] else None,
             confirmation_number=row['confirmation_number'],

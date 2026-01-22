@@ -28,11 +28,6 @@ python backend/demo.py
 python backend/form_filler.py
 ```
 
-### Browser-use Setup
-```bash
-uvx browser-use install  # Install Chromium for browser-use
-```
-
 ## Architecture
 
 ### System Overview
@@ -49,7 +44,7 @@ batch_processor.py          # Main CLI orchestrator
 │   └── submission_result.py # Output data model
 └── handlers/
     ├── base_handler.py     # Abstract base class
-    ├── web_form_handler.py # Generic browser automation
+    ├── web_form_handler.py # Browser-use Cloud API integration
     ├── nextrequest_handler.py
     ├── justfoia_handler.py
     ├── govqa_handler.py
@@ -60,9 +55,9 @@ batch_processor.py          # Main CLI orchestrator
 ### Core Flow
 1. **CSV Reader** parses input file, auto-classifies each URL into a FormType
 2. **Batch Processor** selects appropriate handler for each form
-3. **Handler** executes submission (browser automation or PDF download)
+3. **Handler** executes submission via browser-use Cloud API (or PDF download)
 4. **Result Store** saves outcome to SQLite for tracking/resume
-5. **PDF forms** are downloaded and filled (no email - manual step)
+5. **PDF forms** are downloaded and filled locally (no email - manual step)
 
 ### Handler Selection
 | URL Pattern | FormType | Handler |
@@ -78,8 +73,10 @@ batch_processor.py          # Main CLI orchestrator
 
 ### Environment Variables (`backend/.env`)
 ```
-OPENROUTER_API_KEY=your_key_here
-OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
+# Browser-use Cloud API (get key at https://cloud.browser-use.com)
+BROWSER_USE_API_KEY=your_key_here
+
+# Default contact info for form filling
 DEFAULT_NAME=Your Name
 DEFAULT_EMAIL=you@email.com
 DEFAULT_ADDRESS=123 Main St, City, State ZIP
@@ -97,7 +94,6 @@ python batch_processor.py <csv_file> [options]
 --limit N         Maximum forms to process
 --rate-limit N    Seconds between submissions (default: 30)
 --no-resume       Don't skip already-processed forms
---headless        Run browser without visible window
 --export FILE     Export results to CSV
 --retry-failed    Retry previously failed submissions
 ```
