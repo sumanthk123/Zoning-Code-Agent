@@ -1,28 +1,29 @@
-"""Generic web form handler using browser-use agent."""
+"""Generic web form handler using browser-use Cloud API."""
 
 import asyncio
 import os
 import re
+import aiohttp
 from typing import Optional, Dict, Any
 from datetime import datetime
 from dotenv import load_dotenv
 
-from browser_use import Agent, Browser
-from browser_use.llm import ChatOpenRouter
-
 from .base_handler import BaseFormHandler
 from models.form_entry import FormEntry
 from models.submission_result import SubmissionResult
-from models.enums import SubmissionStatus, FailureReason, FormType
+from models.enums import SubmissionStatus, FailureReason, FormType, SubmissionConfidence
 import logging
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+# Browser-use Cloud API configuration
+BROWSER_USE_API_BASE = "https://api.browser-use.com/api/v2"
+
 
 class WebFormHandler(BaseFormHandler):
     """
-    Generic web form handler using browser-use agent.
+    Generic web form handler using browser-use Cloud API.
     Base class for all browser-based form handlers.
     """
 
@@ -36,19 +37,22 @@ class WebFormHandler(BaseFormHandler):
         address: Optional[str] = None,
         phone: Optional[str] = None,
         password: Optional[str] = None,
-        headless: bool = False,
+        headless: bool = False,  # Not used in Cloud API, kept for compatibility
         max_steps: int = 30,
     ):
         super().__init__(name, email, address, phone, password)
         self.headless = headless
         self.max_steps = max_steps
+        self.api_key = os.getenv('BROWSER_USE_API_KEY')
+        if not self.api_key:
+            raise ValueError("BROWSER_USE_API_KEY environment variable is required")
 
-    def get_llm(self):
-        """Get the LLM instance using browser-use's native ChatOpenRouter."""
-        return ChatOpenRouter(
-            model=os.getenv('OPENROUTER_MODEL', 'anthropic/claude-3.5-sonnet'),
-            api_key=os.getenv('OPENROUTER_API_KEY')
-        )
+    def _get_headers(self) -> Dict[str, str]:
+        """Get headers for browser-use Cloud API requests."""
+        return {
+            "X-Browser-Use-API-Key": self.api_key,
+            "Content-Type": "application/json"
+        }
 
     def build_task_prompt(
         self,
@@ -137,12 +141,85 @@ class WebFormHandler(BaseFormHandler):
 
         return task
 
+    async def _create_task(self, task_prompt: str, session: aiohttp.ClientSession) -> Dict[str, Any]:
+        """Create a task in browser-use Cloud."""
+        url = f"{BROWSER_USE_API_BASE}/tasks"
+        payload = {
+            "task": task_prompt,
+            "maxSteps": self.max_steps,
+        }
+
+        async with session.post(url, headers=self._get_headers(), json=payload) as response:
+            if response.status not in [200, 201, 202]:
+                error_text = await response.text()
+                raise Exception(f"Failed to create task: {response.status} - {error_text}")
+            return await response.json()
+
+    async def _get_task_status(self, task_id: str, session: aiohttp.ClientSession) -> Dict[str, Any]:
+        """Get task status from browser-use Cloud."""
+        url = f"{BROWSER_USE_API_BASE}/tasks/{task_id}"
+
+        async with session.get(url, headers=self._get_headers()) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                raise Exception(f"Failed to get task status: {response.status} - {error_text}")
+            return await response.json()
+
+    async def _stop_session(self, session_id: str, session: aiohttp.ClientSession) -> None:
+        """Stop a browser-use Cloud session."""
+        url = f"{BROWSER_USE_API_BASE}/sessions/{session_id}"
+        payload = {"action": "stop"}
+
+        try:
+            async with session.patch(url, headers=self._get_headers(), json=payload) as response:
+                if response.status != 200:
+                    logger.warning(f"Failed to stop session {session_id}: {response.status}")
+        except Exception as e:
+            logger.warning(f"Error stopping session {session_id}: {e}")
+
+    async def _wait_for_task_completion(
+        self,
+        task_id: str,
+        session: aiohttp.ClientSession,
+        timeout: int = 900,  # 15 minutes max (Cloud session limit)
+        poll_interval: int = 5
+    ) -> Dict[str, Any]:
+        """Poll for task completion."""
+        start_time = datetime.now()
+
+        while True:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            if elapsed > timeout:
+                raise asyncio.TimeoutError(f"Task {task_id} timed out after {timeout} seconds")
+
+            task_data = await self._get_task_status(task_id, session)
+            status = task_data.get("status", "")
+
+            logger.info(f"Task {task_id} status: {status}")
+
+            # Check for terminal states
+            if status in ["finished", "completed", "done"]:
+                return task_data
+            elif status in ["failed", "error", "stopped"]:
+                return task_data
+            elif status == "paused":
+                # Task is paused, might need manual intervention
+                logger.warning(f"Task {task_id} is paused")
+                return task_data
+
+            # Log live URL if available
+            live_url = task_data.get("live_url") or task_data.get("liveUrl")
+            if live_url and elapsed < 10:  # Only log once at the beginning
+                logger.info(f"Live preview: {live_url}")
+
+            await asyncio.sleep(poll_interval)
+
     async def submit(
         self,
         form_entry: FormEntry,
         additional_fields: Optional[Dict[str, Any]] = None,
     ) -> SubmissionResult:
-        """Submit using browser-use agent."""
+        """Submit using browser-use Cloud API."""
 
         if not await self.pre_submit_hook(form_entry):
             return self.create_result(
@@ -152,24 +229,41 @@ class WebFormHandler(BaseFormHandler):
             )
 
         started_at = datetime.now()
+        session_id = None
 
         try:
-            task = self.build_task_prompt(form_entry, additional_fields)
+            task_prompt = self.build_task_prompt(form_entry, additional_fields)
 
-            llm = self.get_llm()
-            browser = Browser(
-                headless=self.headless,
-                window_size={'width': 1000, 'height': 700},
-            )
-            agent = Agent(task=task, llm=llm, use_vision="auto", browser=browser)
+            async with aiohttp.ClientSession() as session:
+                # Create task
+                logger.info(f"Creating browser-use Cloud task for {form_entry.display_name}")
+                task_response = await self._create_task(task_prompt, session)
 
-            agent_result = await agent.run(max_steps=self.max_steps)
+                task_id = task_response.get("id") or task_response.get("task_id") or task_response.get("taskId")
+                session_id = task_response.get("session_id") or task_response.get("sessionId")
 
-            # Parse agent result for status
-            result = self._parse_agent_result(form_entry, agent_result, started_at)
+                if not task_id:
+                    raise Exception(f"No task ID in response: {task_response}")
 
-            await self.post_submit_hook(form_entry, result)
-            return result
+                logger.info(f"Task created: {task_id}, Session: {session_id}")
+
+                # Log live URL if available
+                live_url = task_response.get("live_url") or task_response.get("liveUrl")
+                if live_url:
+                    logger.info(f"Live preview: {live_url}")
+
+                # Wait for completion
+                final_result = await self._wait_for_task_completion(task_id, session)
+
+                # Parse result
+                result = self._parse_cloud_result(form_entry, final_result, started_at)
+
+                # Stop session to free resources
+                if session_id:
+                    await self._stop_session(session_id, session)
+
+                await self.post_submit_hook(form_entry, result)
+                return result
 
         except asyncio.TimeoutError:
             return self.create_result(
@@ -178,7 +272,7 @@ class WebFormHandler(BaseFormHandler):
                 failure_reason=FailureReason.TIMEOUT,
                 started_at=started_at,
                 completed_at=datetime.now(),
-                error_message="Agent timed out"
+                error_message="Task timed out"
             )
         except Exception as e:
             logger.exception(f"Error submitting form for {form_entry.display_name}")
@@ -191,141 +285,277 @@ class WebFormHandler(BaseFormHandler):
                 error_message=str(e)
             )
 
-    def _parse_agent_result(
+    def _parse_cloud_result(
         self,
         form_entry: FormEntry,
-        agent_result: Any,
+        task_data: Dict[str, Any],
         started_at: datetime
     ) -> SubmissionResult:
-        """Parse the agent result to determine status."""
+        """
+        Parse the browser-use Cloud task result using agent behavior detection.
 
-        # Extract the final result from browser-use AgentHistoryList
-        # The agent_result is an AgentHistoryList, we need the final result text
-        final_result_text = ""
-        is_successful = False
+        Detection logic based on what actions the agent actually took:
+        1. If task status = failed/error → FAILED
+        2. If failure_indicators found → FAILED
+        3. If submit_action + navigation evidence → SUCCESS (HIGH confidence)
+        4. If submit_action OR navigation evidence → SUCCESS (MEDIUM confidence)
+        5. If completion_indicators found → NEEDS_VERIFICATION (LOW confidence)
+        6. Default → NEEDS_VERIFICATION (UNKNOWN confidence)
+        """
 
-        if agent_result:
-            # Try to get the final result from the agent history
-            try:
-                # browser-use returns AgentHistoryList with a final_result() method or last item
-                if hasattr(agent_result, 'final_result'):
-                    final_result = agent_result.final_result()
-                    if final_result:
-                        final_result_text = str(final_result).lower()
-                        # Check if agent reported success
-                        if hasattr(final_result, 'success'):
-                            is_successful = final_result.success
-                elif hasattr(agent_result, 'is_done') and agent_result.is_done:
-                    is_successful = True
-                    # Get text from the last action's result
-                    if hasattr(agent_result, '__iter__'):
-                        for item in reversed(list(agent_result)):
-                            if hasattr(item, 'result') and item.result:
-                                if hasattr(item.result, 'extracted_content'):
-                                    final_result_text = str(item.result.extracted_content).lower()
-                                    break
-                                elif hasattr(item.result, 'done'):
-                                    final_result_text = str(item.result.done.text if hasattr(item.result.done, 'text') else item.result.done).lower()
-                                    is_successful = getattr(item.result.done, 'success', True) if hasattr(item.result, 'done') else True
-                                    break
+        status = task_data.get("status", "")
+        output = task_data.get("output") or task_data.get("result") or ""
 
-                # Fallback to string conversion but only use last portion
-                if not final_result_text:
-                    full_text = str(agent_result)
-                    # Only use the last 2000 chars to avoid matching task instructions
-                    final_result_text = full_text[-2000:].lower() if len(full_text) > 2000 else full_text.lower()
-            except Exception as e:
-                logger.warning(f"Error parsing agent result: {e}")
-                final_result_text = str(agent_result)[-2000:].lower()
+        # Convert output to string for parsing
+        if isinstance(output, dict):
+            output_text = str(output.get("text", "")) or str(output)
+        else:
+            output_text = str(output)
 
-        # If agent explicitly reported success, return success
-        if is_successful and ('submitted' in final_result_text or 'request' in final_result_text):
-            # Extract confirmation number if present
-            confirmation_number = None
-            # Look for request ID patterns like #26-8, REQ-12345, etc.
-            id_match = re.search(r'(?:request\s*(?:id|#|number)?[:\s]*)?([#]?[\w\d]+-[\w\d]+|req-?\d+)', final_result_text, re.IGNORECASE)
-            if id_match:
-                confirmation_number = id_match.group(1)
+        output_lower = output_text.lower()
 
+        # ============================================================
+        # STEP 1: Check task status first (API-level failure)
+        # ============================================================
+        if status in ["failed", "error"]:
+            error_msg = task_data.get("error") or task_data.get("message") or "Task failed"
             return self.create_result(
                 form_entry,
-                SubmissionStatus.SUCCESS,
-                failure_reason=FailureReason.NONE,
+                SubmissionStatus.FAILED,
+                failure_reason=FailureReason.UNKNOWN,
+                confidence=SubmissionConfidence.HIGH,
                 started_at=started_at,
                 completed_at=datetime.now(),
-                agent_output=str(agent_result)[-5000:],  # Truncate to avoid huge output
-                confirmation_number=confirmation_number,
-                confirmation_message="Form submitted successfully"
+                agent_output=output_text[:5000],
+                error_message=str(error_msg)
             )
 
-        # Check for stop conditions in final result only
-        if 'captcha_detected' in final_result_text or ('captcha' in final_result_text and 'detected' in final_result_text):
-            return self.create_result(
-                form_entry,
-                SubmissionStatus.CAPTCHA_BLOCKED,
-                failure_reason=FailureReason.CAPTCHA,
-                started_at=started_at,
-                completed_at=datetime.now(),
-                agent_output=str(agent_result)[-5000:]
-            )
+        # ============================================================
+        # STEP 2: Check for failure indicators in agent output
+        # ============================================================
+        failure_indicators = [
+            # Submission failures
+            'could not submit', 'failed to submit', 'submission failed',
+            'unable to submit', 'submit button not found', 'cannot submit',
+            # General errors
+            'error occurred', 'error:', 'failed:', 'unable to complete',
+            'could not complete', 'task failed',
+            # Form issues
+            'form not found', 'no form found', 'required field missing',
+            'validation error', 'invalid input', 'form_not_found',
+            # Access issues
+            'captcha detected', 'captcha_detected', 'blocked by captcha',
+            'login required', 'login_required', 'access denied',
+            'permission denied', 'unauthorized',
+            # Navigation issues
+            'page not found', '404 error', 'timeout', 'connection error',
+            'site unavailable', 'server error',
+        ]
 
-        if 'login_required' in final_result_text:
-            return self.create_result(
-                form_entry,
-                SubmissionStatus.LOGIN_REQUIRED,
-                failure_reason=FailureReason.LOGIN_REQUIRED,
-                started_at=started_at,
-                completed_at=datetime.now(),
-                agent_output=str(agent_result)[-5000:]
-            )
+        for indicator in failure_indicators:
+            if indicator in output_lower:
+                # Determine specific failure reason
+                if 'captcha' in indicator:
+                    return self.create_result(
+                        form_entry,
+                        SubmissionStatus.CAPTCHA_BLOCKED,
+                        failure_reason=FailureReason.CAPTCHA,
+                        confidence=SubmissionConfidence.HIGH,
+                        started_at=started_at,
+                        completed_at=datetime.now(),
+                        agent_output=output_text[:5000],
+                        error_message=f"Detected: {indicator}"
+                    )
+                elif 'login' in indicator:
+                    return self.create_result(
+                        form_entry,
+                        SubmissionStatus.LOGIN_REQUIRED,
+                        failure_reason=FailureReason.LOGIN_REQUIRED,
+                        confidence=SubmissionConfidence.HIGH,
+                        started_at=started_at,
+                        completed_at=datetime.now(),
+                        agent_output=output_text[:5000],
+                        error_message=f"Detected: {indicator}"
+                    )
+                elif 'form not found' in indicator or 'form_not_found' in indicator:
+                    return self.create_result(
+                        form_entry,
+                        SubmissionStatus.FAILED,
+                        failure_reason=FailureReason.FORM_NOT_FOUND,
+                        confidence=SubmissionConfidence.HIGH,
+                        started_at=started_at,
+                        completed_at=datetime.now(),
+                        agent_output=output_text[:5000],
+                        error_message=f"Detected: {indicator}"
+                    )
+                else:
+                    return self.create_result(
+                        form_entry,
+                        SubmissionStatus.FAILED,
+                        failure_reason=FailureReason.UNKNOWN,
+                        confidence=SubmissionConfidence.HIGH,
+                        started_at=started_at,
+                        completed_at=datetime.now(),
+                        agent_output=output_text[:5000],
+                        error_message=f"Detected: {indicator}"
+                    )
 
-        if 'pdf_download' in final_result_text:
+        # Check for PDF download (special case - not failure, but different flow)
+        if 'pdf_download' in output_lower or 'downloaded pdf' in output_lower:
             return self.create_result(
                 form_entry,
                 SubmissionStatus.PDF_DOWNLOADED,
                 failure_reason=FailureReason.NONE,
+                confidence=SubmissionConfidence.HIGH,
                 started_at=started_at,
                 completed_at=datetime.now(),
-                agent_output=str(agent_result)[-5000:]
+                agent_output=output_text[:5000]
             )
 
-        if 'form_not_found' in final_result_text:
-            return self.create_result(
-                form_entry,
-                SubmissionStatus.FAILED,
-                failure_reason=FailureReason.FORM_NOT_FOUND,
-                started_at=started_at,
-                completed_at=datetime.now(),
-                agent_output=str(agent_result)[-5000:]
-            )
+        # ============================================================
+        # STEP 3: Check for submit action evidence
+        # ============================================================
+        submit_action_indicators = [
+            # Direct click actions
+            'clicked submit', 'clicked the submit button', 'clicked "submit"',
+            "clicked 'submit'", 'clicked make request', 'clicked send request',
+            'clicked "make request"', 'pressed submit', 'hit submit',
+            'clicking submit', 'clicking the submit',
+            # Form submission actions
+            'form submitted', 'submitted the form', 'submitted the request',
+            'submission complete', 'request submitted', 'form was submitted',
+            'successfully submitted',
+        ]
 
-        # Check for success indicators
-        success_indicators = ['submitted', 'success', 'confirmation', 'thank you', 'received', 'request id', 'request #']
-        if any(indicator in final_result_text for indicator in success_indicators):
-            # Extract confirmation number if present
-            confirmation_number = None
-            id_match = re.search(r'(?:request\s*(?:id|#|number)?[:\s]*)?([#]?[\w\d]+-[\w\d]+|req-?\d+)', final_result_text, re.IGNORECASE)
-            if id_match:
-                confirmation_number = id_match.group(1)
+        has_submit_action = any(ind in output_lower for ind in submit_action_indicators)
 
+        # Also check for regex patterns
+        submit_patterns = [
+            r'click(?:ed|ing)?\s+(?:on\s+)?(?:the\s+)?submit',
+            r'submit\s+button\s+(?:was\s+)?click',
+            r'press(?:ed|ing)?\s+submit',
+        ]
+        if not has_submit_action:
+            for pattern in submit_patterns:
+                if re.search(pattern, output_lower):
+                    has_submit_action = True
+                    break
+
+        # ============================================================
+        # STEP 4: Check for navigation/confirmation page evidence
+        # ============================================================
+        navigation_indicators = [
+            # Page change indicators
+            'navigated to confirmation', 'redirected to', 'page changed',
+            'new page loaded', 'loaded confirmation', 'taken to',
+            # Confirmation page indicators
+            'confirmation page', 'thank you page', 'success page',
+            'receipt page', 'acknowledgment page', 'confirmation screen',
+            # URL change indicators
+            '/confirmation', '/thank', '/success', '/receipt',
+            '/submitted', '/complete',
+            # Visual confirmation
+            'confirmation message', 'success message', 'thank you for',
+            'request has been received', 'we have received your',
+            'your submission has been', 'your request was received',
+        ]
+
+        has_navigation_evidence = any(ind in output_lower for ind in navigation_indicators)
+
+        # ============================================================
+        # STEP 5: Check for completion indicators (weaker evidence)
+        # ============================================================
+        completion_indicators = [
+            # Task completion
+            'task completed successfully', 'successfully completed',
+            'request has been submitted', 'your request was sent',
+            'completed successfully',
+            # Form completion
+            'all fields filled', 'form complete', 'filled all required fields',
+            'completed the form', 'finished filling',
+            # Generic success
+            'done', 'finished', 'completed',
+        ]
+
+        has_completion_evidence = any(ind in output_lower for ind in completion_indicators)
+
+        # ============================================================
+        # STEP 6: Extract confirmation number if present (bonus info)
+        # ============================================================
+        confirmation_number = None
+        confirmation_patterns = [
+            r'request\s*#?\s*:?\s*([A-Za-z0-9-]{4,})',
+            r'confirmation\s*#?\s*:?\s*([A-Za-z0-9-]{4,})',
+            r'reference\s*#?\s*:?\s*([A-Za-z0-9-]{4,})',
+            r'ticket\s*#?\s*:?\s*([A-Za-z0-9-]{4,})',
+            r'tracking\s*#?\s*:?\s*([A-Za-z0-9-]{4,})',
+            r'case\s*#?\s*:?\s*([A-Za-z0-9-]{4,})',
+            r'#(\d{4,})',
+        ]
+
+        for pattern in confirmation_patterns:
+            match = re.search(pattern, output_text, re.IGNORECASE)
+            if match:
+                confirmation_number = match.group(1)
+                break
+
+        # ============================================================
+        # STEP 7: Determine final status based on evidence
+        # ============================================================
+
+        # HIGH confidence: Both submit action AND navigation evidence
+        if has_submit_action and has_navigation_evidence:
             return self.create_result(
                 form_entry,
                 SubmissionStatus.SUCCESS,
                 failure_reason=FailureReason.NONE,
+                confidence=SubmissionConfidence.HIGH,
                 started_at=started_at,
                 completed_at=datetime.now(),
-                agent_output=str(agent_result)[-5000:],
+                agent_output=output_text[:5000],
                 confirmation_number=confirmation_number,
-                confirmation_message="Form submitted successfully"
+                confirmation_message="Form submitted - agent clicked submit and navigated to confirmation"
             )
 
-        # Default to success if no error indicators (agent completed without issues)
+        # MEDIUM confidence: Submit action OR navigation evidence (one but not both)
+        if has_submit_action or has_navigation_evidence:
+            evidence = "clicked submit" if has_submit_action else "navigated to confirmation"
+            return self.create_result(
+                form_entry,
+                SubmissionStatus.SUCCESS,
+                failure_reason=FailureReason.NONE,
+                confidence=SubmissionConfidence.MEDIUM,
+                started_at=started_at,
+                completed_at=datetime.now(),
+                agent_output=output_text[:5000],
+                confirmation_number=confirmation_number,
+                confirmation_message=f"Form likely submitted - agent {evidence}"
+            )
+
+        # LOW confidence: Completion indicators but no submit/navigation proof
+        if has_completion_evidence:
+            return self.create_result(
+                form_entry,
+                SubmissionStatus.NEEDS_VERIFICATION,
+                failure_reason=FailureReason.NONE,
+                confidence=SubmissionConfidence.LOW,
+                started_at=started_at,
+                completed_at=datetime.now(),
+                agent_output=output_text[:5000],
+                confirmation_number=confirmation_number,
+                confirmation_message="Task completed but no submit action detected - verify manually"
+            )
+
+        # UNKNOWN confidence: Task finished but minimal evidence
+        # Default to NEEDS_VERIFICATION to avoid false positives
         return self.create_result(
             form_entry,
-            SubmissionStatus.SUCCESS,
+            SubmissionStatus.NEEDS_VERIFICATION,
             failure_reason=FailureReason.NONE,
+            confidence=SubmissionConfidence.UNKNOWN,
             started_at=started_at,
             completed_at=datetime.now(),
-            agent_output=str(agent_result)[-5000:],
-            confirmation_message="Agent completed - verify in output"
+            agent_output=output_text[:5000],
+            confirmation_number=confirmation_number,
+            confirmation_message="Task finished but unclear if form was submitted - verify manually"
         )

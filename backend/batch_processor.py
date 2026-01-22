@@ -25,7 +25,7 @@ load_dotenv()
 
 from models.form_entry import FormEntry
 from models.submission_result import SubmissionResult
-from models.enums import FormType, SubmissionStatus
+from models.enums import FormType, SubmissionStatus, SubmissionConfidence
 from handlers.base_handler import BaseFormHandler
 from handlers.web_form_handler import WebFormHandler
 from handlers.nextrequest_handler import NextRequestHandler
@@ -123,6 +123,7 @@ class BatchProcessor:
         self.processed_count = 0
         self.success_count = 0
         self.failure_count = 0
+        self.needs_verification_count = 0
 
     def _init_handlers(self):
         """Initialize handler instances for each form type."""
@@ -242,9 +243,16 @@ class BatchProcessor:
         self.processed_count += 1
         if result.status in (SubmissionStatus.SUCCESS, SubmissionStatus.PDF_DOWNLOADED):
             self.success_count += 1
-            logger.info(f"  RESULT: {result.status.value}")
+            confidence_str = f" (confidence: {result.confidence.value})" if result.confidence else ""
+            logger.info(f"  RESULT: {result.status.value}{confidence_str}")
             if result.confirmation_message:
                 logger.info(f"  {result.confirmation_message}")
+        elif result.status == SubmissionStatus.NEEDS_VERIFICATION:
+            self.needs_verification_count += 1
+            confidence_str = f" (confidence: {result.confidence.value})" if result.confidence else ""
+            logger.warning(f"  RESULT: {result.status.value}{confidence_str}")
+            if result.confirmation_message:
+                logger.warning(f"  {result.confirmation_message}")
         else:
             self.failure_count += 1
             logger.warning(f"  RESULT: {result.status.value} - {result.failure_reason.value}")
@@ -277,6 +285,7 @@ class BatchProcessor:
             'batch_id': self.batch_id,
             'processed': self.processed_count,
             'success': self.success_count,
+            'needs_verification': self.needs_verification_count,
             'failed': self.failure_count,
             'success_rate': (
                 self.success_count / self.processed_count * 100
@@ -292,16 +301,22 @@ class BatchProcessor:
         print("\n" + "=" * 60)
         print("BATCH PROCESSING COMPLETE")
         print("=" * 60)
-        print(f"Batch ID:     {summary['batch_id']}")
-        print(f"Processed:    {summary['processed']}")
-        print(f"Success:      {summary['success']}")
-        print(f"Failed:       {summary['failed']}")
-        print(f"Success Rate: {summary['success_rate']:.1f}%")
+        print(f"Batch ID:           {summary['batch_id']}")
+        print(f"Processed:          {summary['processed']}")
+        print(f"Success:            {summary['success']}")
+        print(f"Needs Verification: {summary['needs_verification']}")
+        print(f"Failed:             {summary['failed']}")
+        print(f"Success Rate:       {summary['success_rate']:.1f}%")
 
         if summary['database_stats']['by_status']:
             print("\nBy Status:")
             for status, count in summary['database_stats']['by_status'].items():
                 print(f"  {status}: {count}")
+
+        if summary['database_stats'].get('by_confidence'):
+            print("\nBy Confidence:")
+            for confidence, count in summary['database_stats']['by_confidence'].items():
+                print(f"  {confidence}: {count}")
 
         if summary['database_stats']['by_failure_reason']:
             print("\nFailure Reasons:")

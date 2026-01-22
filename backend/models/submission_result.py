@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Dict, Any
 
-from .enums import SubmissionStatus, FailureReason
+from .enums import SubmissionStatus, FailureReason, SubmissionConfidence
 
 
 @dataclass
@@ -19,6 +19,7 @@ class SubmissionResult:
     # Status tracking
     status: SubmissionStatus
     failure_reason: FailureReason = FailureReason.NONE
+    confidence: SubmissionConfidence = SubmissionConfidence.UNKNOWN
 
     # Timing
     started_at: Optional[datetime] = None
@@ -53,6 +54,7 @@ class SubmissionResult:
             'url': self.url,
             'status': self.status.value,
             'failure_reason': self.failure_reason.value,
+            'confidence': self.confidence.value,
             'started_at': self.started_at.isoformat() if self.started_at else None,
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
             'confirmation_number': self.confirmation_number,

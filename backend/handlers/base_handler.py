@@ -7,7 +7,7 @@ import logging
 
 from models.form_entry import FormEntry
 from models.submission_result import SubmissionResult
-from models.enums import SubmissionStatus, FailureReason, FormType
+from models.enums import SubmissionStatus, FailureReason, FormType, SubmissionConfidence
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,7 @@ class BaseFormHandler(ABC):
         form_entry: FormEntry,
         status: SubmissionStatus,
         failure_reason: FailureReason = FailureReason.NONE,
+        confidence: SubmissionConfidence = SubmissionConfidence.UNKNOWN,
         **kwargs
     ) -> SubmissionResult:
         """Create a SubmissionResult for the given form entry."""
@@ -90,6 +91,7 @@ class BaseFormHandler(ABC):
             url=form_entry.url,
             status=status,
             failure_reason=failure_reason,
+            confidence=confidence,
             form_type=form_entry.form_type.name if form_entry.form_type else None,
             **kwargs
         )
